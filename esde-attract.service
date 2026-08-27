@@ -1,0 +1,18 @@
+[Unit]
+Description=ES-DE attract mode (Big Box-style roulette through the live UI)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=REPLACE_ME
+# No X/Wayland session needed: input goes through a virtual gamepad on
+# /dev/uinput, which SDL polls regardless of window focus. SupplementaryGroups
+# grants `input` directly, so this does not depend on the login session's group
+# set (systemd --user inherits that from login and misses a later usermod).
+SupplementaryGroups=input
+ExecStart=/home/REPLACE_ME/.local/bin/esde-attract
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

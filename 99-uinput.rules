@@ -1,0 +1,2 @@
+# Let members of `input` create virtual input devices.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

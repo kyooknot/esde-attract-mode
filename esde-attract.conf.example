@@ -1,0 +1,28 @@
+[attract]
+# Idle seconds before the roulette starts
+wait_time = 180
+# Games to visit before backing out and picking a different system
+games_per_system = 4
+# Seconds parked on a game — long enough for the theme's video panel to start
+dwell = 12
+# Spin length, in list steps
+spin_min = 22
+spin_max = 55
+# Gap between steps: starts at speed_max (fast), eases to speed_min (slow) — the deceleration
+speed_max = 0.008
+speed_min = 0.45
+switch_systems = true
+poll = 0.25
+# Deceleration curve for the game-list spin. 1 = linear slowdown;
+# higher holds the fast blur longer then drops off sharply.
+# 3 gives the Wheel-of-Fortune settle.
+ease = 3.5
+# The system carousel is animated and cannot take the blur, so its
+# spin is short and always linear.
+carousel_min = 4
+carousel_max = 8
+# What counts as 'you are using the machine':
+#   gamepad = controllers only — attract mode keeps running while you
+#             work in another window with keyboard and mouse
+#   all     = any keyboard/mouse/controller activity (whole-PC idle)
+watch = gamepad

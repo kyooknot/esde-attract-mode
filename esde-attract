@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""ES-DE attract mode — a Big Box-style roulette through the live ES-DE UI.
+
+ES-DE has no attract mode. Its built-in `video` screensaver takes over the whole
+screen with a fullscreen video; Big Box instead *drives the real UI* — spinning
+the game list, settling on a game long enough for the theme's video panel to
+start, then backing out to the system carousel and diving into another system.
+This reproduces that.
+
+Input is delivered through a VIRTUAL GAMEPAD (/dev/uinput) rather than synthetic
+keystrokes. ES-DE runs with SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1, so SDL polls
+joysticks regardless of window focus — meaning attract mode keeps running while
+you work in another window, which synthetic keystrokes could never do.
+
+It stops the instant you touch a real control: raw events are read from
+/dev/input, and the daemon's own virtual device is excluded by path.
+
+Requires: /dev/uinput writable (udev rule + `input` group) and membership of
+`input` to read the event devices.
+"""
+import os, sys, time, glob, select, struct, random, configparser, subprocess
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from esde_vpad import VirtualPad, BTN_SOUTH, BTN_EAST
+
+CONF = os.path.expanduser("~/.config/esde-attract.conf")
+EVENT_FMT = "llHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FMT)
+EV_KEY, EV_REL, EV_ABS = 0x01, 0x02, 0x03
+
+DEFAULTS = {
+    "wait_time": "180", "games_per_system": "4", "dwell": "12",
+    "spin_min": "22", "spin_max": "55",
+    "speed_max": "0.02", "speed_min": "0.45",
+    "ease": "3.0",
+    "carousel_min": "4", "carousel_max": "8",
+    # which devices count as "you are using the machine":
+    #   gamepad = controllers only (attract mode runs while you work elsewhere)
+    #   all     = any keyboard/mouse/controller (whole-PC idle)
+    "watch": "gamepad",
+    "switch_systems": "true", "poll": "0.25",
+}
+
+# Emulators that take over from ES-DE. While one of these is running the
+# virtual pad is destroyed, so it can never be enumerated as a controller port
+# in a game. udev orders pads by event number, so a pad that merely exists can
+# take player 1 if the real controller happens to reconnect on a higher number
+# (e.g. after sleep/wake). Not existing is the only robust guarantee.
+EMULATORS = ("retroarch", "duckstation", "pcsx2", "PPSSPP", "EmuHawk", "RAppleWin")
+
+def emulator_running():
+    try:
+        out = subprocess.run(["ps", "-eo", "comm,args"], capture_output=True,
+                             text=True, timeout=4).stdout
+    except Exception:
+        return False
+    return any(e.lower() in out.lower() for e in EMULATORS)
+
+def load_conf():
+    cp = configparser.ConfigParser()
+    cp["attract"] = dict(DEFAULTS)
+    if os.path.exists(CONF):
+        cp.read(CONF)
+    return cp["attract"]
+
+def is_gamepad(event_path):
+    """True if the device advertises gamepad buttons (BTN_GAMEPAD, 0x130).
+
+    Capability bitmaps live in /sys as space-separated 64-bit words, most
+    significant first — so bit 0x130 sits in the word at index len-1-(0x130//64).
+    """
+    name = os.path.basename(event_path)
+    try:
+        with open(f"/sys/class/input/{name}/device/capabilities/key") as f:
+            words = f.read().split()
+        idx = len(words) - 1 - (0x130 // 64)
+        if idx < 0:
+            return False
+        return bool(int(words[idx], 16) & (1 << (0x130 % 64)))
+    except Exception:
+        return False
+
+class InputWatcher:
+    """Watches /dev/input for genuine human activity, ignoring our own device."""
+    def __init__(self, exclude=(), mode="gamepad"):
+        self.exclude = set(exclude)
+        self.mode = mode
+        self.fds = {}
+        for path in glob.glob("/dev/input/event*"):
+            if path in self.exclude:
+                continue
+            if mode == "gamepad" and not is_gamepad(path):
+                continue
+            try:
+                self.fds[os.open(path, os.O_RDONLY | os.O_NONBLOCK)] = path
+            except OSError:
+                pass
+        self.last = time.monotonic()
+        self._next_scan = time.monotonic()
+
+    def rescan(self):
+        """Pick up controllers that appeared since startup.
+
+        Wireless pads sleep and come back on a NEW /dev/input node. Without this
+        the watcher keeps holding the dead node and never sees the reconnected
+        controller — so attract mode would not stop when you picked it up.
+        """
+        have = set(self.fds.values())
+        for path in glob.glob("/dev/input/event*"):
+            if path in self.exclude or path in have:
+                continue
+            if self.mode == "gamepad" and not is_gamepad(path):
+                continue
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            self.fds[fd] = path
+            print(f"attract: now watching {path}", flush=True)
+
+    def drain(self):
+        if time.monotonic() >= self._next_scan:
+            self._next_scan = time.monotonic() + 3.0
+            self.rescan()
+        hit = False
+        for _ in range(64):                      # bounded: never spin forever
+            if not self.fds:
+                break
+            r, _, _ = select.select(list(self.fds), [], [], 0)
+            if not r:
+                break
+            progressed = False
+            for fd in r:
+                try:
+                    data = os.read(fd, EVENT_SIZE * 64)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    self.fds.pop(fd, None); continue
+                if not data:                     # ready but empty: not a live source
+                    self.fds.pop(fd, None); continue
+                progressed = True
+                for i in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+                    _, _, etype, _, _ = struct.unpack(EVENT_FMT, data[i:i+EVENT_SIZE])
+                    if etype in (EV_KEY, EV_REL, EV_ABS):
+                        hit = True
+            if not progressed:
+                break
+        if hit:
+            self.last = time.monotonic()
+        return hit
+
+    def idle(self):
+        return time.monotonic() - self.last
+
+def sleep_watch(seconds, watcher):
+    """Sleep, but bail the moment a human touches something."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if watcher.drain():
+            return False
+        time.sleep(0.05)
+    return True
+
+def spin(pad, k, watcher, cfg, axis="y", direction=1, ease=None):
+    """A decelerating roulette spin: a fast blur easing to a stop.
+
+    The gap between steps runs from `speed_max` to `speed_min` along t**ease.
+    A higher exponent holds the fast phase longer and then drops off sharply —
+    the Wheel-of-Fortune feel. ease=1 is a flat linear slowdown.
+    """
+    fast, slow = float(cfg["speed_max"]), float(cfg["speed_min"])
+    e = float(cfg.get("ease", "3.0")) if ease is None else ease
+    for i in range(k):
+        if watcher.drain():
+            return False
+        pad.dpad(**({"dy": direction} if axis == "y" else {"dx": direction}))
+        t = i / max(k - 1, 1)
+        if not sleep_watch(fast + (slow - fast) * (t ** e), watcher):
+            return False
+    return True
+
+def main():
+    cfg = load_conf()
+    try:
+        pad = VirtualPad()
+    except OSError as e:
+        print(f"cannot open /dev/uinput ({e}) — is the udev rule installed "
+              f"and this user in the 'input' group?", file=sys.stderr)
+        return 1
+    # Held open while ES-DE is in front, so ES-DE announces the device once at
+    # login rather than on every attract cycle — but torn down whenever a game
+    # is running, so it can never claim a controller port.
+    watcher = InputWatcher(exclude=[pad.event_path], mode=cfg.get("watch", "gamepad"))
+    if not watcher.fds:
+        print("no readable /dev/input devices — is this user in the 'input' group?",
+              file=sys.stderr)
+        return 1
+    print(f"esde-attract: virtual pad at {pad.event_path or '?'}; "
+          f"watch mode '{watcher.mode}' over {len(watcher.fds)} device(s) "
+          f"({', '.join(sorted(watcher.fds.values())) or 'none'}); "
+          f"wait={cfg['wait_time']}s", flush=True)
+    running = False
+    visited = 0
+    try:
+        while True:
+            watcher.drain()
+            # Never let the virtual pad exist while a game is running.
+            if emulator_running():
+                if pad is not None:
+                    pad.close(); pad = None
+                    print("attract: pad released (emulator running)", flush=True)
+                running = False
+                time.sleep(1.0)
+                continue
+            if pad is None:
+                pad = VirtualPad()
+                watcher.exclude.add(pad.event_path)
+                print(f"attract: pad reacquired at {pad.event_path}", flush=True)
+            if not running:
+                if watcher.idle() >= float(cfg["wait_time"]):
+                    cfg = load_conf()          # pick up edits without a restart
+                    # Normalise the view. B is Back: from a gamelist it lands on
+                    # the system carousel, on the carousel it is harmless. Never
+                    # press A in a gamelist — that LAUNCHES the game.
+                    pad.press(BTN_EAST); time.sleep(0.8)
+                    pad.press(BTN_EAST); time.sleep(0.8)
+                    if not spin(pad, random.randint(int(cfg["carousel_min"]),
+                                                    int(cfg["carousel_max"])),
+                                watcher, cfg, "x", 1, ease=1.0):
+                        continue
+                    time.sleep(0.8)
+                    pad.press(BTN_SOUTH); time.sleep(1.5)   # into a system
+                    running, visited = True, 0
+                    print("attract: start", flush=True)
+                else:
+                    time.sleep(float(cfg["poll"]))
+                continue
+            k = random.randint(int(cfg["spin_min"]), int(cfg["spin_max"]))
+            if not spin(pad, k, watcher, cfg, "y", 1) \
+               or not sleep_watch(float(cfg["dwell"]), watcher):
+                running = False
+                print("attract: stop (user input)", flush=True)
+                continue
+            visited += 1
+            if cfg.getboolean("switch_systems") and visited >= int(cfg["games_per_system"]):
+                visited = 0
+                pad.press(BTN_EAST)                          # Back to the carousel
+                if not sleep_watch(1.2, watcher): running = False; continue
+                if not spin(pad, random.randint(int(cfg["carousel_min"]),
+                                                int(cfg["carousel_max"])),
+                            watcher, cfg, "x", 1, ease=1.0):
+                    running = False; continue
+                if not sleep_watch(0.8, watcher): running = False; continue
+                pad.press(BTN_SOUTH)                         # into the new system
+                if not sleep_watch(1.5, watcher): running = False; continue
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if pad is not None:
+            pad.close()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
