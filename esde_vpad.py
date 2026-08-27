@@ -5,10 +5,13 @@ regardless of window focus — which is why a controller drives ES-DE while you
 type elsewhere, but synthetic keystrokes do not. Emitting gamepad events instead
 of keystrokes lets attract mode run while you work in another window.
 
-The device deliberately mimics the real 8BitDo's vendor/product/name so SDL
-applies the same controller mapping ES-DE already knows. That means the watcher
-cannot tell them apart by name — it excludes this device by its event node path,
-which we resolve after creation.
+The device uses its own identity (pid.codes 0x1209:0xE5DE, named "ES-DE Attract
+Virtual Pad") rather than impersonating a physical controller. ES-DE reports an
+unknown GUID as "default configuration" and navigates it fine, so there is
+nothing to gain by cloning a real device — and cloning one makes it
+indistinguishable from the real thing in the frontend's controller list.
+
+The watcher excludes this device by its event node path, resolved after creation.
 """
 import os, fcntl, struct, ctypes, time, glob
 

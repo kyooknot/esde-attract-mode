@@ -4,7 +4,7 @@ wait_time = 180
 # Games to visit before backing out and picking a different system
 games_per_system = 4
 # Seconds parked on a game — long enough for the theme's video panel to start
-dwell = 12
+dwell = 30
 # Spin length, in list steps
 spin_min = 22
 spin_max = 55

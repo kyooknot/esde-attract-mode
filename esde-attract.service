@@ -10,7 +10,7 @@ User=REPLACE_ME
 # grants `input` directly, so this does not depend on the login session's group
 # set (systemd --user inherits that from login and misses a later usermod).
 SupplementaryGroups=input
-ExecStart=/home/REPLACE_ME/.local/bin/esde-attract
+ExecStart=REPLACE_HOME/.local/bin/esde-attract
 Restart=on-failure
 RestartSec=10
 

@@ -17,7 +17,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG input "$U"
 
 echo "==> installing the service"
-sed "s/REPLACE_ME/$U/g" esde-attract.service | sudo tee /etc/systemd/system/esde-attract.service >/dev/null
+sed -e "s|REPLACE_HOME|$H|g" -e "s/REPLACE_ME/$U/g" esde-attract.service | sudo tee /etc/systemd/system/esde-attract.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now esde-attract
 

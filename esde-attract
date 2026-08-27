@@ -235,6 +235,7 @@ def main():
                 else:
                     time.sleep(float(cfg["poll"]))
                 continue
+            cfg = load_conf()   # re-read each cycle so tuning applies immediately
             k = random.randint(int(cfg["spin_min"]), int(cfg["spin_max"]))
             if not spin(pad, k, watcher, cfg, "y", 1) \
                or not sleep_watch(float(cfg["dwell"]), watcher):
